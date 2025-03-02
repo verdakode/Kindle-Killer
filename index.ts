@@ -3,6 +3,7 @@ import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
 import { chunkText } from './src/utils/textProcessor';
+import OpenAI from 'openai';
 
 class ExampleAugmentOSApp extends TpaServer {
   // Track state
@@ -12,6 +13,8 @@ class ExampleAugmentOSApp extends TpaServer {
   private pdfChunks: string[] = [];
   private autoAdvanceTimer: NodeJS.Timeout | null = null;
   private isAutoAdvancing: boolean = false;
+  private isInVocabLookupMode: boolean = false;
+  private vocabQuery: string = '';
 
   // Add speed control properties
   private readingSpeed: number = 5000; // Default speed (ms per chunk)
@@ -73,6 +76,55 @@ class ExampleAugmentOSApp extends TpaServer {
         // Process final transcriptions
         if (data.isFinal) {
           const lowerText = data.text.toLowerCase();
+          
+          // Check for "Hey reader" command to trigger vocab lookup
+          if (lowerText.includes('hey reader')) {
+            // Stop auto-advance if it's running
+            this.stopAutoAdvance();
+            
+            // Enter vocab lookup mode
+            this.isInVocabLookupMode = true;
+            this.vocabQuery = '';
+            
+            session.layouts.showTextWall("Vocabulary lookup mode activated. Please speak the word or phrase you want to look up.", {
+              durationMs: 5000
+            });
+            return;
+          }
+          
+          // If in vocab lookup mode, process the query
+          if (this.isInVocabLookupMode) {
+            if (lowerText.includes('cancel') || lowerText.includes('exit lookup') || 
+                lowerText.includes('continue reading') || lowerText.includes('resume reading')) {
+              // Exit vocab lookup mode
+              this.isInVocabLookupMode = false;
+              session.layouts.showTextWall("Vocabulary lookup completed. Resuming reading.", {
+                durationMs: 3000
+              });
+              
+              // Resume reading
+              this.isDisplayingPdf = true;
+              this.startAutoAdvance(session);
+            } else if (!this.vocabQuery) {
+              // If we don't have a query yet, use this transcription as the query
+              this.vocabQuery = data.text.trim();
+              
+              if (this.vocabQuery) {
+                session.layouts.showTextWall(`Looking up: "${this.vocabQuery}"...`, {
+                  durationMs: 3000
+                });
+                
+                // Perform the vocabulary lookup
+                this.performVocabLookup(session, this.vocabQuery);
+              }
+            } else {
+              // If we already have a query and definition displayed, remind the user how to continue
+              session.layouts.showTextWall(`Say "continue reading" when you're ready to resume.`, {
+                durationMs: 3000
+              });
+            }
+            return;
+          }
           
           // Check for navigation commands
           if (this.isDisplayingPdf) {
@@ -151,8 +203,8 @@ class ExampleAugmentOSApp extends TpaServer {
           // Log transcription for debugging
           console.log('Final transcription:', data.text);
         } else {
-          // For non-final transcriptions, only show them if not displaying text
-          if (!this.isDisplayingPdf) {
+          // For non-final transcriptions, only show them if not displaying text or if in vocab lookup mode
+          if (!this.isDisplayingPdf || this.isInVocabLookupMode) {
             session.layouts.showTextWall(data.text);
           }
         }
@@ -176,6 +228,33 @@ class ExampleAugmentOSApp extends TpaServer {
     cleanup.forEach(handler => this.addCleanupHandler(handler));
   }
   
+  private async performVocabLookup(session: TpaSession, query: string): Promise<void> {
+    try {
+      // Show loading message
+      session.layouts.showTextWall(`Looking up: "${query}"...`, {
+        durationMs: 5000
+      });
+      
+      // Use the heyGPT function to get the definition
+      const definition = await this.heyGPT(`Define and explain the word or phrase: "${query}". Include definition, etymology, usage examples, and related words. Format your response in a clear, readable way.`);
+      
+      // Display the definition and instructions to continue
+      session.layouts.showTextWall(`Vocabulary Lookup: "${query}"\n\n${definition}\n\nSay "continue reading" when you're ready to resume.`, {
+        durationMs: 10000
+      });
+      
+      // We'll stay in vocab lookup mode until the user explicitly says "continue reading"
+      // This is handled in the onTranscription event handler
+      
+    } catch (error) {
+      console.error('Error performing vocabulary lookup:', error);
+      session.layouts.showTextWall(`Error looking up "${query}". Please try again or say "cancel" to resume reading.`, {
+        durationMs: 5000
+      });
+    }
+  }
+  
+  
   private displayPdfChunk(session: TpaSession): void {
     if (this.currentChunkIndex >= 0 && this.currentChunkIndex < this.pdfChunks.length) {
       const chunk = this.pdfChunks[this.currentChunkIndex];
@@ -188,27 +267,20 @@ class ExampleAugmentOSApp extends TpaServer {
       
       // Display the chunk with progress indicator
       session.layouts.showTextWall(`${progress}\n\n${chunk}`, {
-        durationMs: this.readingSpeed,
-        preserveLineBreaks: true,
-        preserveWhitespace: true
+        durationMs: this.readingSpeed
       });
       
-      console.log(`Displaying chunk ${this.currentChunkIndex + 1}/${this.pdfChunks.length}`);
+      console.log(`Displaying chunk ${this.currentChunkIndex + 1}/${this.pdfChunks.length} at speed ${this.readingSpeed}ms`);
       
-      // Set default reading speed for these medium-sized chunks
-      if (this.readingSpeed === 3000) {
-        this.readingSpeed = 5000; // Default to 5 seconds per chunk
-        this.overlapTime = 1000;  // 1 second overlap
-      }
-      
-      // Pre-load the next chunk to eliminate gaps
+      // Pre-load the next chunk to eliminate gaps, but use full reading speed
+      // with a small buffer (e.g., 200ms) to ensure smooth transitions
       if (this.isAutoAdvancing && this.currentChunkIndex < this.pdfChunks.length - 1) {
         setTimeout(() => {
           if (this.isAutoAdvancing) {
             this.currentChunkIndex++;
             this.displayPdfChunk(session);
           }
-        }, this.overlapTime);
+        }, this.readingSpeed - 200); // Small buffer for smooth transition
       }
     }
   }
@@ -280,7 +352,7 @@ class ExampleAugmentOSApp extends TpaServer {
 // DEV CONSOLE URL: https://augmentos.dev/
 // Get your webhook URL from ngrok (or whatever public URL you have)
 const app = new ExampleAugmentOSApp({
-  packageName: 'org.example.kindlekiller', // make sure this matches your app in dev console
+  packageName: 'org.kindlesethandjake.myapp', // make sure this matches your app in dev console
   apiKey: 'your_api_key', // Not used right now, play nice
   port: 80, // The port you're hosting the server on
   augmentOSWebsocketUrl: 'wss://staging.augmentos.org/tpa-ws' //AugmentOS url
