@@ -1,4 +1,4 @@
-# AugmentOS-Cloud-Example-App
+# Kindle Killer
 
 
 ![header](https://github.com/user-attachments/assets/f69defec-7011-45f2-b258-94e6c712a758)
