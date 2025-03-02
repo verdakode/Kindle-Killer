@@ -1,29 +1,242 @@
 import { TpaServer, TpaSession } from '@augmentos/sdk';
+import axios from 'axios';
+import path from 'path';
+import fs from 'fs';
+import { chunkText } from './src/utils/textProcessor';
 
 class ExampleAugmentOSApp extends TpaServer {
+  // Track state
+  private lastTranscriptionTime: number = 0;
+  private isDisplayingPdf: boolean = false;
+  private currentChunkIndex: number = 0;
+  private pdfChunks: string[] = [];
+  private autoAdvanceTimer: NodeJS.Timeout | null = null;
+  private isAutoAdvancing: boolean = false;
+
+  // Add speed control properties
+  private readingSpeed: number = 2000; // Default speed (ms per chunk)
+  private overlapTime: number = 1800; // Default overlap time
+
   protected async onSession(session: TpaSession, sessionId: string, userId: string): Promise<void> {
     // Show welcome message
-    session.layouts.showTextWall("Example Captions App Ready!");
+    session.layouts.showTextWall("Text Reader App Ready!");
+    
+    // Load the text file
+    try {
+      const textFilePath = path.resolve(__dirname, 'I, Robot (Isaac Asimov) (Z-Library).txt');
+      console.log('Current directory:', process.cwd());
+      console.log('__dirname:', __dirname);
+      console.log('Resolved text file path:', textFilePath);
+      console.log('File exists:', fs.existsSync(textFilePath));
+      
+      // Read the text file
+      const text = fs.readFileSync(textFilePath, 'utf8');
+      console.log(`Read ${text.length} characters from text file`);
+      
+      // Chunk the text
+      this.pdfChunks = chunkText(text, 1000, 200);
+      console.log(`Created ${this.pdfChunks.length} chunks from text file`);
+      
+      // Display first chunk
+      if (this.pdfChunks.length > 0) {
+        this.isDisplayingPdf = true;
+        session.layouts.showTextWall("Starting text presentation. Auto-advancing through chunks. Say 'stop' to pause.", {
+          durationMs: 5000
+        });
+        this.displayPdfChunk(session);
+        
+        // Start auto-advancing immediately
+        this.startAutoAdvance(session);
+      }
+    } catch (error) {
+      console.error('Error loading text file:', error);
+      session.layouts.showTextWall("Error loading text file. Please try again.");
+    }
 
     // Handle real-time transcription
     const cleanup = [
       session.events.onTranscription((data) => {
-        session.layouts.showTextWall(data.text, {
-          durationMs: data.isFinal ? 3000 : undefined
-        });
+        const currentTime = Date.now();
+        this.lastTranscriptionTime = currentTime;
+
+        // Process final transcriptions
+        if (data.isFinal) {
+          const lowerText = data.text.toLowerCase();
+          
+          // Check for navigation commands
+          if (this.isDisplayingPdf) {
+            if (lowerText.includes('auto') || lowerText.includes('play') || lowerText.includes('start reading')) {
+              // Start auto-advancing through chunks
+              this.startAutoAdvance(session);
+              session.layouts.showTextWall("Auto-advancing through text. Say 'pause' to stop.", {
+                durationMs: 3000
+              });
+            } else if (lowerText.includes('faster') || lowerText.includes('speed up') || lowerText.includes('go faster')) {
+              // Increase reading speed
+              this.adjustReadingSpeed(session, -500); // Reduce time between chunks
+            } else if (lowerText.includes('slower') || lowerText.includes('slow down') || lowerText.includes('go slower')) {
+              // Decrease reading speed
+              this.adjustReadingSpeed(session, 500); // Increase time between chunks
+            } else if (lowerText.includes('next') || lowerText.includes('continue')) {
+              // Stop auto-advance if it's running
+              this.stopAutoAdvance();
+              
+              // Manually go to next chunk
+              this.currentChunkIndex++;
+              if (this.currentChunkIndex >= this.pdfChunks.length) {
+                this.currentChunkIndex = this.pdfChunks.length - 1;
+                session.layouts.showTextWall("End of document reached.");
+              } else {
+                this.displayPdfChunk(session);
+              }
+            } else if (lowerText.includes('previous') || lowerText.includes('back')) {
+              // Stop auto-advance if it's running
+              this.stopAutoAdvance();
+              
+              this.currentChunkIndex--;
+              if (this.currentChunkIndex < 0) {
+                this.currentChunkIndex = 0;
+                session.layouts.showTextWall("Already at the beginning of document.");
+              } else {
+                this.displayPdfChunk(session);
+              }
+            } else if (lowerText.includes('stop') || lowerText.includes('exit') || 
+                      lowerText.includes('pause') || lowerText.includes('transcribe')) {
+              // Stop auto-advance if it's running
+              this.stopAutoAdvance();
+              
+              this.isDisplayingPdf = false;
+              session.layouts.showTextWall("Text reading paused. Now in transcription mode. Say 'resume text' to continue reading.", {
+                durationMs: 5000
+              });
+            } else if (lowerText.includes('restart')) {
+              // Stop auto-advance if it's running
+              this.stopAutoAdvance();
+              
+              this.currentChunkIndex = 0;
+              this.displayPdfChunk(session);
+            }
+            // Ignore all other transcriptions when in text mode
+          } else {
+            // Not currently displaying text - in transcription mode
+            if (lowerText.includes('start text') || lowerText.includes('resume text') || 
+                lowerText.includes('continue text') || lowerText.includes('read text') ||
+                lowerText.includes('continue') || lowerText.includes('start')) {
+              this.isDisplayingPdf = true;
+              session.layouts.showTextWall("Resuming text reading from where you left off. Auto-advancing enabled.", {
+                durationMs: 3000
+              });
+              
+              // Start auto-advancing by default when resuming
+              this.startAutoAdvance(session);
+            } else {
+              // Show the transcription
+              session.layouts.showTextWall(data.text, {
+                durationMs: 3000
+              });
+            }
+          }
+
+          // Log transcription for debugging
+          console.log('Final transcription:', data.text);
+        } else {
+          // For non-final transcriptions, only show them if not displaying text
+          if (!this.isDisplayingPdf) {
+            session.layouts.showTextWall(data.text);
+          }
+        }
       }),
 
-      session.events.onPhoneNotifications((data) => {}),
+      session.events.onPhoneNotifications((data) => { }),
 
-      session.events.onGlassesBattery((data) => {}),
+      session.events.onGlassesBattery((data) => { }),
 
       session.events.onError((error) => {
         console.error('Error:', error);
-      })
+      }),
+
+      // Add cleanup for timers when session ends
+      () => {
+        this.stopAutoAdvance();
+      }
     ];
 
     // Add cleanup handlers
     cleanup.forEach(handler => this.addCleanupHandler(handler));
+  }
+  
+  private displayPdfChunk(session: TpaSession): void {
+    if (this.currentChunkIndex >= 0 && this.currentChunkIndex < this.pdfChunks.length) {
+      const chunk = this.pdfChunks[this.currentChunkIndex];
+      const progress = `[${this.currentChunkIndex + 1}/${this.pdfChunks.length}]`;
+      
+      // Display the chunk with progress indicator
+      session.layouts.showTextWall(`${progress}\n\n${chunk}`, {
+        durationMs: this.readingSpeed  // Use the adjustable reading speed
+      });
+      
+      console.log(`Displaying chunk ${this.currentChunkIndex + 1}/${this.pdfChunks.length} at speed ${this.readingSpeed}ms`);
+      
+      // Pre-load the next chunk to eliminate gaps
+      if (this.isAutoAdvancing && this.currentChunkIndex < this.pdfChunks.length - 1) {
+        setTimeout(() => {
+          if (this.isAutoAdvancing) {
+            this.currentChunkIndex++;
+            this.displayPdfChunk(session);
+          }
+        }, this.overlapTime); // Use the adjustable overlap time
+      }
+    }
+  }
+  
+  private startAutoAdvance(session: TpaSession): void {
+    // Clear any existing timer
+    this.stopAutoAdvance();
+    
+    // Set flag
+    this.isAutoAdvancing = true;
+    
+    // Start displaying chunks immediately
+    this.displayPdfChunk(session);
+  }
+  
+  private stopAutoAdvance(): void {
+    // Clear any interval timer
+    if (this.autoAdvanceTimer) {
+      clearInterval(this.autoAdvanceTimer);
+      this.autoAdvanceTimer = null;
+    }
+    
+    // Also clear any pending setTimeout callbacks
+    // We can't directly cancel them, but we can set the flag to prevent them from continuing
+    this.isAutoAdvancing = false;
+    
+    console.log('Auto-advance stopped at chunk', this.currentChunkIndex + 1);
+  }
+
+  // Add a method to adjust reading speed
+  private adjustReadingSpeed(session: TpaSession, adjustment: number): void {
+    const oldSpeed = this.readingSpeed;
+    
+    // Adjust the reading speed
+    this.readingSpeed = Math.max(500, Math.min(5000, this.readingSpeed + adjustment));
+    
+    // Adjust the overlap time to be slightly less than the reading speed
+    this.overlapTime = Math.max(400, this.readingSpeed - 200);
+    
+    // Provide feedback about the speed change
+    let speedMessage = "";
+    if (adjustment < 0) {
+      speedMessage = `Reading speed increased. Now showing each chunk for ${this.readingSpeed/1000} seconds.`;
+    } else {
+      speedMessage = `Reading speed decreased. Now showing each chunk for ${this.readingSpeed/1000} seconds.`;
+    }
+    
+    session.layouts.showTextWall(speedMessage, {
+      durationMs: 2000
+    });
+    
+    console.log(`Reading speed adjusted from ${oldSpeed}ms to ${this.readingSpeed}ms`);
   }
 }
 
@@ -31,9 +244,9 @@ class ExampleAugmentOSApp extends TpaServer {
 // DEV CONSOLE URL: https://augmentos.dev/
 // Get your webhook URL from ngrok (or whatever public URL you have)
 const app = new ExampleAugmentOSApp({
-  packageName: 'org.augmentos.exampleapp', // make sure this matches your app in dev console
+  packageName: 'org.example.creator', // make sure this matches your app in dev console
   apiKey: 'your_api_key', // Not used right now, play nice
-  port: 3000, // The port you're hosting the server on
+  port: 8080, // The port you're hosting the server on
   augmentOSWebsocketUrl: 'wss://dev.augmentos.org/tpa-ws' //AugmentOS url
 });
 
