@@ -14,7 +14,7 @@ class ExampleAugmentOSApp extends TpaServer {
   private isAutoAdvancing: boolean = false;
 
   // Add speed control properties
-  private readingSpeed: number = 2000; // Default speed (ms per chunk)
+  private readingSpeed: number = 5000; // Default speed (ms per chunk)
   private overlapTime: number = 1800; // Default overlap time
 
   protected async onSession(session: TpaSession, sessionId: string, userId: string): Promise<void> {
@@ -30,12 +30,23 @@ class ExampleAugmentOSApp extends TpaServer {
       console.log('File exists:', fs.existsSync(textFilePath));
       
       // Read the text file
-      const text = fs.readFileSync(textFilePath, 'utf8');
+      let text = fs.readFileSync(textFilePath, 'utf8');
       console.log(`Read ${text.length} characters from text file`);
       
-      // Chunk the text
-      this.pdfChunks = chunkText(text, 1000, 200);
+      // Clean up the text but preserve line breaks and formatting
+      // Remove any non-printable characters
+      text = text.replace(/[^\x20-\x7E\n\r\t]/g, '');
+      
+      // Chunk the text while preserving line breaks
+      this.pdfChunks = chunkText(text, 2000, 200); // Increased chunk size for better reading
       console.log(`Created ${this.pdfChunks.length} chunks from text file`);
+      
+      // DEBUG: Print the first chunk to verify content
+      if (this.pdfChunks.length > 0) {
+        console.log("\n\n========== FIRST CHUNK CONTENT START ==========");
+        console.log(this.pdfChunks[0]);
+        console.log("========== FIRST CHUNK CONTENT END ==========\n\n");
+      }
       
       // Display first chunk
       if (this.pdfChunks.length > 0) {
@@ -170,12 +181,25 @@ class ExampleAugmentOSApp extends TpaServer {
       const chunk = this.pdfChunks[this.currentChunkIndex];
       const progress = `[${this.currentChunkIndex + 1}/${this.pdfChunks.length}]`;
       
+      // DEBUG: Print the chunk to the console
+      console.log("\n\n========== CHUNK CONTENT START ==========");
+      console.log(chunk);
+      console.log("========== CHUNK CONTENT END ==========\n\n");
+      
       // Display the chunk with progress indicator
       session.layouts.showTextWall(`${progress}\n\n${chunk}`, {
-        durationMs: this.readingSpeed  // Use the adjustable reading speed
+        durationMs: this.readingSpeed,
+        preserveLineBreaks: true,
+        preserveWhitespace: true
       });
       
-      console.log(`Displaying chunk ${this.currentChunkIndex + 1}/${this.pdfChunks.length} at speed ${this.readingSpeed}ms`);
+      console.log(`Displaying chunk ${this.currentChunkIndex + 1}/${this.pdfChunks.length}`);
+      
+      // Set default reading speed for these medium-sized chunks
+      if (this.readingSpeed === 3000) {
+        this.readingSpeed = 5000; // Default to 5 seconds per chunk
+        this.overlapTime = 1000;  // 1 second overlap
+      }
       
       // Pre-load the next chunk to eliminate gaps
       if (this.isAutoAdvancing && this.currentChunkIndex < this.pdfChunks.length - 1) {
@@ -184,7 +208,7 @@ class ExampleAugmentOSApp extends TpaServer {
             this.currentChunkIndex++;
             this.displayPdfChunk(session);
           }
-        }, this.overlapTime); // Use the adjustable overlap time
+        }, this.overlapTime);
       }
     }
   }
@@ -214,12 +238,12 @@ class ExampleAugmentOSApp extends TpaServer {
     console.log('Auto-advance stopped at chunk', this.currentChunkIndex + 1);
   }
 
-  // Add a method to adjust reading speed
+  // Fix the adjustReadingSpeed method
   private adjustReadingSpeed(session: TpaSession, adjustment: number): void {
     const oldSpeed = this.readingSpeed;
     
     // Adjust the reading speed
-    this.readingSpeed = Math.max(500, Math.min(5000, this.readingSpeed + adjustment));
+    this.readingSpeed = Math.max(500, Math.min(10000, this.readingSpeed + adjustment));
     
     // Adjust the overlap time to be slightly less than the reading speed
     this.overlapTime = Math.max(400, this.readingSpeed - 200);
@@ -227,9 +251,9 @@ class ExampleAugmentOSApp extends TpaServer {
     // Provide feedback about the speed change
     let speedMessage = "";
     if (adjustment < 0) {
-      speedMessage = `Reading speed increased. Now showing each chunk for ${this.readingSpeed/1000} seconds.`;
+      speedMessage = `Reading speed increased. Now showing each chunk for ${(this.readingSpeed/1000).toFixed(1)} seconds.`;
     } else {
-      speedMessage = `Reading speed decreased. Now showing each chunk for ${this.readingSpeed/1000} seconds.`;
+      speedMessage = `Reading speed decreased. Now showing each chunk for ${(this.readingSpeed/1000).toFixed(1)} seconds.`;
     }
     
     session.layouts.showTextWall(speedMessage, {
@@ -237,6 +261,18 @@ class ExampleAugmentOSApp extends TpaServer {
     });
     
     console.log(`Reading speed adjusted from ${oldSpeed}ms to ${this.readingSpeed}ms`);
+    
+    // If we're currently auto-advancing, restart with the new speed
+    if (this.isAutoAdvancing) {
+      // Stop the current auto-advance
+      this.stopAutoAdvance();
+      
+      // Wait a moment to show the speed change message
+      setTimeout(() => {
+        // Restart auto-advance with new speed
+        this.startAutoAdvance(session);
+      }, 2000);
+    }
   }
 }
 
@@ -244,10 +280,10 @@ class ExampleAugmentOSApp extends TpaServer {
 // DEV CONSOLE URL: https://augmentos.dev/
 // Get your webhook URL from ngrok (or whatever public URL you have)
 const app = new ExampleAugmentOSApp({
-  packageName: 'org.example.creator', // make sure this matches your app in dev console
+  packageName: 'org.example.kindlekiller', // make sure this matches your app in dev console
   apiKey: 'your_api_key', // Not used right now, play nice
-  port: 8080, // The port you're hosting the server on
-  augmentOSWebsocketUrl: 'wss://dev.augmentos.org/tpa-ws' //AugmentOS url
+  port: 80, // The port you're hosting the server on
+  augmentOSWebsocketUrl: 'wss://staging.augmentos.org/tpa-ws' //AugmentOS url
 });
 
 app.start().catch(console.error);
